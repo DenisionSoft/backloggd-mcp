@@ -4,6 +4,7 @@ import type { GameRef } from "../api/index.js";
 import { GENRES, PLATFORMS } from "../vocab.js";
 import { LIBRARY_SORTS } from "../filters.js";
 import type { LibraryQuery } from "../filters.js";
+import { DeadlineError } from "../errors.js";
 
 const gameArg = z
   .string()
@@ -137,9 +138,15 @@ export const readTools: AnyToolDef[] = [
       "are 20 games, which do I already have?'. Names that match no game are reported as " +
       "not_found rather than failing the batch.\n\n" +
       "Cost: one request per name to resolve it, plus one shared request for all the " +
-      "shelf states. Turning on include_lists adds another request per game, which on a " +
-      "slow connection can push a large batch past the client's tool-call timeout — keep " +
-      "those batches to roughly ten games, or split them.",
+      "shelf states. include_lists adds list membership; for a large batch it pages your " +
+      "lists once and inverts them rather than asking per game, so it stays affordable.\n\n" +
+      "The call has a wall-clock budget and stops early rather than exceeding the " +
+      "client's tool-call timeout. When that happens `summary.incomplete` is true and " +
+      "`summary.notAttempted` lists the names it did not reach; `summary.listsPartial` " +
+      "means list membership is under-reported and absence of a list does not prove " +
+      "absence. Either way, just call again with the remaining names — resolved games " +
+      "and the list index are both cached, so follow-up calls are much faster. For 40+ " +
+      "games expect to make two or three calls.",
     inputSchema: {
       games: z
         .array(z.string().min(1))
@@ -160,12 +167,30 @@ export const readTools: AnyToolDef[] = [
       const names = args["games"] as string[];
       const includeLists = args["include_lists"] as boolean;
 
+      // Stop before the MCP client's tool-call timeout rather than blowing through it.
+      // Exceeding it loses the entire result; stopping early loses only the tail, and
+      // the caller can ask for the rest.
+      const deadline = Date.now() + ctx.config.batchBudgetMs;
+
       // Resolve first so the shelf lookup can be a single batched request.
       const resolved: { query: string; ref: GameRef | null; error?: string }[] = [];
+      const notAttempted: string[] = [];
       for (const name of names) {
+        if (Date.now() > deadline) {
+          notAttempted.push(name);
+          continue;
+        }
         try {
-          resolved.push({ query: name, ref: await ctx.api.resolveGame(name) });
+          resolved.push({
+            query: name,
+            ref: await ctx.http.withDeadline(deadline, () => ctx.api.resolveGame(name)),
+          });
         } catch (err) {
+          // Out of time is not a failed lookup — the name simply never got tried.
+          if (err instanceof DeadlineError) {
+            notAttempted.push(name);
+            continue;
+          }
           resolved.push({
             query: name,
             ref: null,
@@ -175,7 +200,46 @@ export const readTools: AnyToolDef[] = [
       }
 
       const found = resolved.filter((r) => r.ref !== null);
-      const states = await ctx.api.getBatchLogs(found.map((r) => r.ref!.id));
+      const states = await ctx.http
+        .withDeadline(deadline, () => ctx.api.getBatchLogs(found.map((r) => r.ref!.id)))
+        .catch(() => new Map());
+
+      /*
+       * Two ways to learn list membership, with very different costs:
+       *
+       *  - per game: one request each, so 100 games is 100 requests;
+       *  - reverse index: page every list once and invert it, so the cost tracks the
+       *    number of lists and is flat in the number of games.
+       *
+       * The index wins as soon as there are more games than list pages, which for a
+       * typical account is around a dozen. Below that the per-game path avoids paying
+       * for lists the caller never asked about.
+       */
+      const username = (await ctx.http.withDeadline(deadline, () =>
+        ctx.session.ensureAuthenticated(),
+      )).username;
+
+      let listIndex: Map<number, { id: number; name: string; url: string | null }[]> | null = null;
+      let listsPartial = false;
+      let useIndex = false;
+      if (includeLists) {
+        try {
+          const listCount = (
+            await ctx.http.withDeadline(deadline, () => ctx.api.getLists(username, 1))
+          ).items.length;
+          useIndex = found.length > listCount;
+          if (useIndex) {
+            const built = await ctx.http.withDeadline(deadline, () =>
+              ctx.api.getListMembershipIndex(username, deadline),
+            );
+            listIndex = built.index;
+            listsPartial = !built.complete;
+          }
+        } catch {
+          // Losing list membership must not lose the shelf data we already have.
+          listsPartial = true;
+        }
+      }
 
       interface CheckResult {
         query: string;
@@ -200,11 +264,25 @@ export const readTools: AnyToolDef[] = [
           continue;
         }
         const state = states.get(item.ref.id);
-        const lists = includeLists
-          ? (await ctx.api.getGameListMembership(item.ref.id))
+
+        let lists: { id: number; name: string; url: string | null }[] | undefined;
+        if (listIndex) {
+          lists = listIndex.get(item.ref.id) ?? [];
+        } else if (includeLists && Date.now() <= deadline) {
+          try {
+            lists = (
+              await ctx.http.withDeadline(deadline, () =>
+                ctx.api.getGameListMembership(item.ref!.id),
+              )
+            )
               .filter((l) => l.contains)
-              .map((l) => ({ id: l.listId, name: l.name, url: l.url }))
-          : undefined;
+              .map((l) => ({ id: l.listId, name: l.name, url: l.url }));
+          } catch {
+            listsPartial = true;
+          }
+        } else if (includeLists) {
+          listsPartial = true;
+        }
 
         results.push({
           query: item.query,
@@ -235,6 +313,36 @@ export const readTools: AnyToolDef[] = [
           tracked,
           untracked: found.length - tracked,
           listsChecked: includeLists,
+          listStrategy: !includeLists
+            ? "skipped"
+            : useIndex
+              ? "index"
+              : listsPartial
+                ? "unavailable"
+                : "per-game",
+          // The index ran out of time, so list membership is under-reported: a game
+          // shown with no lists might be in one of the lists that was never scanned.
+          ...(listsPartial
+            ? {
+                listsPartial: true,
+                listsNote:
+                  "Ran out of time while scanning your lists, so list membership is " +
+                  "incomplete — absence of a list here does not prove absence. Retry " +
+                  "with a smaller batch, or raise BACKLOGGD_BATCH_BUDGET_MS.",
+              }
+            : {}),
+          // Non-empty only when the time budget ran out. Call again with just these.
+          ...(notAttempted.length > 0
+            ? {
+                incomplete: true,
+                notAttempted,
+                note:
+                  `Stopped after ${ctx.config.batchBudgetMs / 1000}s to stay inside the ` +
+                  `client's tool-call timeout. ${notAttempted.length} name(s) were not ` +
+                  `checked — call again with just those. Resolved games are cached, so ` +
+                  `the retry is faster.`,
+              }
+            : {}),
         },
       };
     },

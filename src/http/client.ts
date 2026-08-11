@@ -1,7 +1,7 @@
 import { request } from "undici";
 import { CookieJar } from "tough-cookie";
 import { BASE_URL, USER_AGENT, redact, type Config } from "../config.js";
-import { AuthError, HttpError, RateLimitError } from "../errors.js";
+import { AuthError, DeadlineError, HttpError, RateLimitError } from "../errors.js";
 import { RateLimiter } from "./ratelimit.js";
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
@@ -49,6 +49,17 @@ export class HttpClient {
   private readonly jar = new CookieJar();
   private readonly limiter: RateLimiter;
 
+  /**
+   * Wall-clock deadline for the operation in progress, if any.
+   *
+   * Checking a budget only *between* requests is not enough: one stalled request can
+   * burn minutes on its own once retries and their backoff are counted, which is how a
+   * 25-second budget turned into a 116-second call. The deadline therefore also caps
+   * each attempt's socket timeouts and blocks retries that could not finish in time.
+   * Requests are serialised by the rate limiter, so a single ambient value is safe.
+   */
+  private deadline: number | null = null;
+
   /** Rails CSRF token, cached for the session and refreshed on a 422. */
   private csrfToken: string | null = null;
 
@@ -58,6 +69,23 @@ export class HttpClient {
 
   constructor(private readonly config: Config) {
     this.limiter = new RateLimiter(config);
+  }
+
+  /** Run `fn` with a wall-clock deadline that bounds every request it makes. */
+  async withDeadline<T>(deadlineAt: number, fn: () => Promise<T>): Promise<T> {
+    const previous = this.deadline;
+    // Never widen an enclosing deadline.
+    this.deadline = previous === null ? deadlineAt : Math.min(previous, deadlineAt);
+    try {
+      return await fn();
+    } finally {
+      this.deadline = previous;
+    }
+  }
+
+  /** Milliseconds left in the current deadline, or Infinity when none is set. */
+  remainingMs(): number {
+    return this.deadline === null ? Infinity : this.deadline - Date.now();
   }
 
   onSessionExpired(fn: () => Promise<void>): void {
@@ -122,6 +150,11 @@ export class HttpClient {
     let lastErr: unknown;
 
     for (let attempt = 0; attempt <= this.config.maxRetries; attempt++) {
+      // Refuse to start work that cannot finish inside the caller's budget. Better a
+      // clean partial result than an overrun that loses everything.
+      if (this.remainingMs() <= 0) {
+        throw new DeadlineError(path, attempt);
+      }
       try {
         const headers = { ...(opts.headers ?? {}) };
         if (needsCsrf) headers["X-CSRF-Token"] = await this.getCsrfToken();
@@ -169,6 +202,8 @@ export class HttpClient {
         // and then deliver nothing. Treat that as transient and retry with backoff
         // rather than reporting the endpoint as broken.
         const backoff = Math.min(1000 * 2 ** attempt, 15_000) + Math.random() * 500;
+        // A retry that would land past the deadline is wasted time; stop now.
+        if (backoff >= this.remainingMs()) throw err;
         this.debug(`retry ${attempt + 1}/${this.config.maxRetries} for ${path}: ${describe(err)}`);
         await sleep(backoff);
       }
@@ -234,8 +269,16 @@ export class HttpClient {
       method: opts.method ?? "GET",
       headers,
       body,
-      headersTimeout: Math.min(this.config.requestTimeoutMs, 25_000),
-      bodyTimeout: Math.min(this.config.requestTimeoutMs, 25_000),
+      // Cap the socket timeouts by whatever is left of the deadline, so a stall cannot
+      // outlive the budget it is supposed to be spending.
+      headersTimeout: Math.max(
+        2000,
+        Math.min(this.config.requestTimeoutMs, 25_000, this.remainingMs()),
+      ),
+      bodyTimeout: Math.max(
+        2000,
+        Math.min(this.config.requestTimeoutMs, 25_000, this.remainingMs()),
+      ),
     });
 
     const setCookie = res.headers["set-cookie"];

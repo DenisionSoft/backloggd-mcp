@@ -52,6 +52,10 @@ export class BackloggdApi {
   private readonly gameCache = new TtlCache<GameDetail>(CACHE_TTL.gameMetadata);
   private readonly stateCache = new TtlCache<GameLog>(CACHE_TTL.userState);
   private readonly listMembershipCache = new TtlCache<ListMembership[]>(CACHE_TTL.userState);
+  private readonly listIndexCache = new TtlCache<{
+    index: Map<number, { id: number; name: string; url: string | null }[]>;
+    scanned: Set<string>;
+  }>(CACHE_TTL.listIndex, 8);
 
   constructor(
     private readonly http: HttpClient,
@@ -302,6 +306,91 @@ export class BackloggdApi {
       query: { page: page > 1 ? page : undefined },
     });
     return parseReviews(res.body, page);
+  }
+
+  /**
+   * Reverse index of every list's contents: gameId -> list names.
+   *
+   * `getGameListMembership` costs one request per *game*, which is fine for a handful
+   * and ruinous for a hundred. This instead pages every list once — one request per
+   * list page, independent of how many games are being checked — and inverts it. With
+   * a dozen lists the two strategies cross over at roughly a dozen games.
+   */
+  async getListMembershipIndex(
+    username: string,
+    deadline?: number,
+  ): Promise<{
+    index: Map<number, { id: number; name: string; url: string | null }[]>;
+    complete: boolean;
+    listsScanned: number;
+    listsTotal: number;
+  }> {
+    const key = `index:${username}`;
+    const lists = await this.getLists(username, 1);
+
+    // Resume from whatever a previous, time-limited attempt managed to scan. Discarding
+    // partial work meant a cold start needed three calls to converge; keeping it means
+    // every call makes progress and the answer completes on the second.
+    const cached = this.listIndexCache.get(key);
+    const index = cached?.index ?? new Map<number, { id: number; name: string; url: string | null }[]>();
+    const scannedSlugs = cached?.scanned ?? new Set<string>();
+
+    if (lists.items.every((l) => scannedSlugs.has(l.slug))) {
+      return {
+        index,
+        complete: true,
+        listsScanned: scannedSlugs.size,
+        listsTotal: lists.items.length,
+      };
+    }
+
+    let complete = true;
+
+    for (const list of lists.items) {
+      if (scannedSlugs.has(list.slug)) continue;
+      // List pages are 300-400 KB each, so on a slow link this loop is the expensive
+      // part of a batch check — by bytes, not by request count. Stop at the caller's
+      // deadline and report a partial index rather than blowing their timeout.
+      if (deadline !== undefined && Date.now() > deadline) {
+        complete = false;
+        break;
+      }
+      // Lists render 100 per page, so most are a single request.
+      let previousSignature = "";
+      for (let page = 1; page <= 10; page++) {
+        const detail = await this.getList(username, list.slug, page);
+        if (detail.games.length === 0) break;
+
+        // Backloggd re-serves the final page for any out-of-range page number, and its
+        // "next" link is not always absent on the last page — so `hasMore` alone will
+        // happily loop forever. Compare the page's contents instead.
+        const signature = detail.games.map((g) => g.id).join(",");
+        if (signature === previousSignature) break;
+        previousSignature = signature;
+
+        for (const g of detail.games) {
+          const entry = { id: list.gameCount ?? 0, name: list.name, url: list.url };
+          const existing = index.get(g.id);
+          if (existing) {
+            if (!existing.some((e) => e.name === list.name)) existing.push(entry);
+          } else {
+            index.set(g.id, [entry]);
+          }
+        }
+        if (!detail.hasMore) break;
+      }
+      scannedSlugs.add(list.slug);
+    }
+
+    // Cache partial progress too — but `complete` still reflects this call, so callers
+    // know not to treat an absent list as proof of absence until every list is in.
+    this.listIndexCache.set(key, { index, scanned: scannedSlugs });
+    return {
+      index,
+      complete,
+      listsScanned: scannedSlugs.size,
+      listsTotal: lists.items.length,
+    };
   }
 
   /**
@@ -725,5 +814,8 @@ export class BackloggdApi {
   private invalidate(gameId: number): void {
     this.stateCache.delete(`log:${gameId}`);
     this.listMembershipCache.delete(`lists:${gameId}`);
+    // The reverse index spans every list, so any list change invalidates all of it —
+    // including the record of which lists were already scanned.
+    this.listIndexCache.clear();
   }
 }

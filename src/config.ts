@@ -34,6 +34,12 @@ export interface Config {
   maxWritesPerHour: number;
   requestTimeoutMs: number;
   maxRetries: number;
+  /**
+   * Soft wall-clock budget for a single batch tool call, ms. On reaching it a tool
+   * returns what it has plus the names it did not get to, instead of running past the
+   * MCP client's tool-call timeout and losing the whole result.
+   */
+  batchBudgetMs: number;
   /** Emit request-level diagnostics on stderr. Never includes credentials. */
   debug: boolean;
 }
@@ -75,15 +81,22 @@ export function loadConfig(): Config {
       process.env["BACKLOGGD_STATE_PATH"]?.trim() ||
       join(homedir(), ".backloggd-mcp", "session.json"),
 
-    // Conservative by default. Backloggd is a small, Patreon-funded site run by one
-    // person; there is no upside to being fast here, and a restricted account is a
-    // much worse outcome than a slow tool.
-    minRequestIntervalMs: envInt("BACKLOGGD_MIN_REQUEST_INTERVAL_MS", 700),
+    // Reads run at ~3/second. That is still far below what a person clicking around
+    // generates in bursts, and it keeps batch tools inside a client's tool-call
+    // timeout — a limit that used to make a 40-game check fail outright rather than
+    // merely run slowly. Writes stay deliberately slow: they are the ones that trip
+    // Backloggd's own per-action limits, and a restricted account is a much worse
+    // outcome than a slow tool.
+    minRequestIntervalMs: envInt("BACKLOGGD_MIN_REQUEST_INTERVAL_MS", 350),
     minWriteIntervalMs: envInt("BACKLOGGD_MIN_WRITE_INTERVAL_MS", 2500),
     maxWritesPerMinute: envInt("BACKLOGGD_MAX_WRITES_PER_MINUTE", 12),
     maxWritesPerHour: envInt("BACKLOGGD_MAX_WRITES_PER_HOUR", 200),
 
     requestTimeoutMs: envInt("BACKLOGGD_REQUEST_TIMEOUT_MS", 45_000),
+    // Deliberately well under a typical MCP client tool-call timeout (~60s). The
+    // budget is checked between requests, so a single slow request can overshoot it —
+    // leaving headroom is what keeps the overshoot from becoming a lost result.
+    batchBudgetMs: envInt("BACKLOGGD_BATCH_BUDGET_MS", 25_000),
     maxRetries: envInt("BACKLOGGD_MAX_RETRIES", 5),
     debug: envBool("BACKLOGGD_DEBUG"),
   };

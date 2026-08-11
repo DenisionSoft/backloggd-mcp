@@ -57,5 +57,11 @@ export const CACHE_TTL = {
   slugToId: 24 * 3600_000,
   gameMetadata: 6 * 3600_000,
   userState: 20_000,
+  /**
+   * The all-lists reverse index. Expensive to build (one large page per list), so it
+   * gets a much longer life than other user state — and every list write clears it
+   * explicitly, so staleness cannot outlive an actual change made through this server.
+   */
+  listIndex: 5 * 60_000,
   publicPage: 5 * 60_000,
 } as const;

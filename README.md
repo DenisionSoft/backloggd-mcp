@@ -107,12 +107,13 @@ recovers on its own.
 | Variable | Default | Purpose |
 | --- | --- | --- |
 | `BACKLOGGD_READONLY` | off | Do not even register the write tools. |
-| `BACKLOGGD_MIN_REQUEST_INTERVAL_MS` | `700` | Floor on the gap between any two requests. |
+| `BACKLOGGD_MIN_REQUEST_INTERVAL_MS` | `350` | Floor on the gap between any two requests. |
 | `BACKLOGGD_MIN_WRITE_INTERVAL_MS` | `2500` | Floor on the gap between two writes. |
 | `BACKLOGGD_MAX_WRITES_PER_MINUTE` | `12` | Per-minute write budget. |
 | `BACKLOGGD_MAX_WRITES_PER_HOUR` | `200` | Per-hour write budget. |
 | `BACKLOGGD_REQUEST_TIMEOUT_MS` | `45000` | Per-request ceiling. |
 | `BACKLOGGD_MAX_RETRIES` | `5` | Retries for stalls and transient failures. |
+| `BACKLOGGD_BATCH_BUDGET_MS` | `25000` | Wall-clock budget for one batch call. Batch tools return partial results at this point rather than overrunning the client's tool-call timeout. |
 | `BACKLOGGD_STATE_PATH` | `~/.backloggd-mcp/session.json` | Where the session is cached. |
 | `BACKLOGGD_DEBUG` | off | Request diagnostics on stderr (never credentials). |
 
@@ -138,13 +139,18 @@ under your name.
 
 **`query_library`** is the main one. Backloggd's library URLs are a filter grammar, and this
 exposes all of it: shelf, completion status, **release platform**, genre, year, rating and
-category, sorted by anything including `avg-finish-time` (shortest games first) and `shuffle`.
+category, sorted by anything including `avg-finish-time` and `shuffle`.
 
 ```
-query_library(shelf: "backlog", sort: "avg-finish-time")     → what can I actually finish?
 query_library(shelf: "backlog", release_platform: "PS5")     → what do I own that runs on PS5?
 query_library(shelf: "backlog", release_platform: "Wii U")   → what would I have to emulate?
+query_library(shelf: "backlog", sort: "shuffle")             → just pick something
 ```
+
+A caveat on `avg-finish-time`: it ranks **longest first** by default, and `order: "asc"` does
+not give you short games — it surfaces the ones with *no* recorded completion time at all
+(MMOs, live-service, obscure titles). There is no clean server-side "shortest games" query;
+take an ascending page and check real hours with `get_games_metadata`.
 
 Platform and genre accept plain names — "PS5", "Meta Quest 3", "RPG" — and are validated
 against the real vocabularies before the request goes out. That matters because Backloggd
@@ -156,8 +162,15 @@ query being malformed.
 state attached to every game, 60 per request. Good for "which FromSoftware games haven't I
 played", and for franchise gap-hunting.
 
-**`check_games`** takes a pile of titles and reports, per game, the shelf, rating and which of
-your custom lists contain it.
+**`check_games`** takes a pile of titles and reports, per game, the shelf, rating and
+optionally which of your custom lists contain it.
+
+Large batches are bounded rather than unbounded: the call has a wall-clock budget and returns
+partial results — flagging `notAttempted` and `listsPartial` — instead of blowing past the
+client's tool-call timeout and losing everything. Progress is cached (resolved games for a
+day, the list index for five minutes, resuming where a timed-out scan stopped), so simply
+calling again finishes the job. In practice a 40-game batch bounded at ~26s completes on the
+second call in ~15s, and 100 games means three calls of at most 40 each.
 
 **`find_in_collection`** searches shelves *and* every custom list at once — necessary because
 Backloggd's list pages ignore the filter grammar entirely.

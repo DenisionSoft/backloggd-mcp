@@ -76,6 +76,28 @@ export class ParseError extends BackloggdError {
   }
 }
 
+/**
+ * The caller's wall-clock budget ran out before this request could be made.
+ *
+ * Distinct from a network timeout: nothing went wrong, we simply declined to start
+ * work that could not finish in time. Batch tools catch this and return partial
+ * results rather than failing.
+ */
+export class DeadlineError extends BackloggdError {
+  constructor(
+    readonly path: string,
+    readonly attempt: number,
+  ) {
+    super(
+      `Ran out of time before requesting ${path}.`,
+      "DEADLINE",
+      "The batch budget was exhausted. Retry with fewer items, or raise " +
+        "BACKLOGGD_BATCH_BUDGET_MS.",
+    );
+    this.name = "DeadlineError";
+  }
+}
+
 /** A write was attempted while the server is in read-only mode. */
 export class ReadOnlyError extends BackloggdError {
   constructor(tool: string) {
