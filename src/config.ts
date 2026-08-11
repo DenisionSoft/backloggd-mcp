@@ -14,7 +14,7 @@ export const BASE_URL = "https://backloggd.com";
  */
 export const USER_AGENT =
   `backloggd-mcp/${process.env["npm_package_version"] ?? "0.1.0"} ` +
-  `(+https://github.com/backloggd-mcp/backloggd-mcp; user-driven MCP client, not a crawler)`;
+  `(+https://github.com/DenisionSoft/backloggd-mcp; user-driven MCP client, not a crawler)`;
 
 export type AuthMode = "session" | "password" | "browser" | "none";
 

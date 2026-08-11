@@ -24,14 +24,23 @@ Nothing to install — point your MCP client at `npx`:
   "mcpServers": {
     "backloggd": {
       "command": "npx",
-      "args": ["-y", "backloggd-mcp"],
+      "args": ["-y", "github:DenisionSoft/backloggd-mcp"],
       "env": { "BACKLOGGD_BROWSER_IMPORT": "firefox" }
     }
   }
 }
 ```
 
-Requires Node 20+.
+Requires Node 20+. Not on npm yet, so install straight from GitHub — the package builds
+itself on install.
+
+Or clone and point at the build directly:
+
+```bash
+git clone https://github.com/DenisionSoft/backloggd-mcp && cd backloggd-mcp && npm install
+```
+
+then use `"command": "node", "args": ["/absolute/path/to/backloggd-mcp/dist/index.js"]`.
 
 ## Authentication
 
