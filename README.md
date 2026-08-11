@@ -19,28 +19,54 @@ tries to be a good citizen about it.
 
 Nothing to install — point your MCP client at `npx`:
 
+Requires Node 20+. Not on npm yet, so install straight from GitHub — the package builds
+itself on install via its `prepare` script.
+
+**Claude Code** — `claude mcp add` picks up your shell environment, so this is enough:
+
+```bash
+claude mcp add backloggd -s user -e BACKLOGGD_BROWSER_IMPORT=firefox -- npx -y github:DenisionSoft/backloggd-mcp
+```
+
+**Claude Desktop** — edit `claude_desktop_config.json`
+(`~/Library/Application Support/Claude/` on macOS):
+
 ```json
 {
   "mcpServers": {
     "backloggd": {
-      "command": "npx",
+      "command": "/opt/homebrew/bin/npx",
       "args": ["-y", "github:DenisionSoft/backloggd-mcp"],
-      "env": { "BACKLOGGD_BROWSER_IMPORT": "firefox" }
+      "env": {
+        "PATH": "/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin",
+        "BACKLOGGD_BROWSER_IMPORT": "firefox"
+      }
     }
   }
 }
 ```
 
-Requires Node 20+. Not on npm yet, so install straight from GitHub — the package builds
-itself on install.
+The absolute command path and the explicit `PATH` are both required, and this is the single
+most common reason a Desktop MCP server silently fails to start: Desktop is a GUI app and
+does **not** inherit your shell environment, so a bare `"command": "npx"` cannot be found,
+and even an absolute `npx` dies with `env: node: No such file or directory` because its
+shebang cannot locate node. Adjust the paths if node lives somewhere other than Homebrew
+(`which node` will tell you). `git` must be reachable too — npx clones the repo to install it.
 
-Or clone and point at the build directly:
+### Pinning to a local checkout instead
+
+Installing from a git ref re-resolves against GitHub on every server start (~2s warm, and it
+blocks rather than falling back to cache if GitHub is unreachable). If you would rather have
+an instant, offline-capable start — or you are actively editing the code — clone it and point
+at the build:
 
 ```bash
 git clone https://github.com/DenisionSoft/backloggd-mcp && cd backloggd-mcp && npm install
 ```
 
-then use `"command": "node", "args": ["/absolute/path/to/backloggd-mcp/dist/index.js"]`.
+then use `"command": "node", "args": ["/absolute/path/to/backloggd-mcp/dist/index.js"]`. That
+starts in ~250ms and needs no network to launch, but it runs whatever is in `dist/` — you must
+`npm run build` to pick up changes.
 
 ## Authentication
 
