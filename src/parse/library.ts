@@ -37,7 +37,6 @@ export function parseLibraryPage(html: string, page: number): Page<LibraryEntry>
         id: gameId,
         slug,
         title,
-        year: null,
         coverUrl: img.attr("src") ?? null,
         url: `${BASE_URL}/games/${slug}/`,
       },

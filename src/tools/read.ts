@@ -91,7 +91,11 @@ export const readTools: AnyToolDef[] = [
     title: "Get game details",
     description:
       "Full metadata for one game — description, genres, platforms, developers, release " +
-      "date and the site-wide average rating — plus your own log entry for it.",
+      "date, community playtime, the rating histogram and the site-wide average — plus " +
+      "your own log entry for it. parentGameSlug is set when the game is add-on content " +
+      "(DLC, an expansion, an edition) and names what it belongs to. For the precise " +
+      "category label (Main Game / DLC / Expansion / Bundle) use search_games, which is " +
+      "the only place Backloggd prints it.",
     inputSchema: {
       game: gameArg,
       include_my_log: z
@@ -167,7 +171,23 @@ export const readTools: AnyToolDef[] = [
       const found = resolved.filter((r) => r.ref !== null);
       const states = await ctx.api.getBatchLogs(found.map((r) => r.ref!.id));
 
-      const results = [];
+      interface CheckResult {
+        query: string;
+        found: boolean;
+        reason?: string;
+        title?: string;
+        /** Omitted when resolution did not yield a year — never nulled. */
+        year?: number;
+        url?: string;
+        status?: string;
+        playedStatus?: string | null;
+        rating?: number | null;
+        liked?: boolean;
+        lists?: { id: number; name: string; url: string | null }[];
+        untracked?: boolean;
+      }
+
+      const results: CheckResult[] = [];
       for (const item of resolved) {
         if (!item.ref) {
           results.push({ query: item.query, found: false, reason: item.error });
@@ -184,6 +204,9 @@ export const readTools: AnyToolDef[] = [
           query: item.query,
           found: true,
           title: item.ref.title ?? item.ref.slug,
+          // Present when resolution went through autocomplete or a game page; omitted
+          // rather than nulled when the lookup did not yield one.
+          ...(item.ref.year != null ? { year: item.ref.year } : {}),
           url: `https://backloggd.com/games/${item.ref.slug}/`,
           status: state?.status ?? "none",
           playedStatus: state?.playedStatus ?? null,
@@ -244,7 +267,10 @@ export const readTools: AnyToolDef[] = [
       "runs on PS5'; sort='shuffle' picks at random; sort='avg-finish-time' ranks by how " +
       "long games take (LONGEST first by default — see the sort notes).\n\n" +
       "An empty result means nothing matched — invalid filter values are rejected before " +
-      "the request is sent, so a zero-row answer is trustworthy.",
+      "the request is sent, so a zero-row answer is trustworthy.\n\n" +
+      "Rows carry id, slug, title, cover and your own shelf/rating only. Backloggd's grid " +
+      "markup has no release year, platforms or genres, so those keys are absent rather " +
+      "than null — use get_games_metadata to fill them in for a shortlist.",
     inputSchema: {
       username: usernameArg,
       shelf: z
@@ -474,7 +500,8 @@ export const readTools: AnyToolDef[] = [
     title: "Browse a company's games",
     description:
       "Every game by a developer or publisher, with YOUR shelf and rating attached to each " +
-      "one — 60 per request, no follow-up lookups. Good for 'which FromSoftware games " +
+      "one — 60 per request, no follow-up lookups. Rows carry no year or platforms (grid " +
+      "markup has neither); enrich a shortlist with get_games_metadata if you need them. Good for 'which FromSoftware games " +
       "haven't I played' and for franchise gap-hunting: browse the publisher, then look for " +
       "the entries you don't have. Company slugs come from get_game's developers field or " +
       "the company links on a game page.",

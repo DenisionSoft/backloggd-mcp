@@ -141,7 +141,6 @@ export function gameFromCard($: Doc, card: Node): GameSummary | null {
     id: id ?? 0,
     slug: slug ?? "",
     title: title ?? slug ?? "Unknown",
-    year: null,
     coverUrl: img.attr("src") ?? null,
     url: slug ? `${BASE_URL}/games/${slug}/` : BASE_URL,
   };

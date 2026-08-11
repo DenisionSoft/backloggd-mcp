@@ -355,3 +355,60 @@ describe("social pages", () => {
     expect(result.items).toEqual([]);
   });
 });
+
+describe("absent vs null fields", () => {
+  /**
+   * `year: null` on a grid row reads as "this game has no release year", which is false —
+   * Backloggd's grid markup simply has no year in it. The key is omitted instead so the
+   * distinction between "unknown" and "none" survives into the tool output.
+   */
+  it("omits year on library rows rather than nulling it", () => {
+    const page = parseLibraryPage(fixture("lib-games.html"), 1);
+    const first = page.items[0]?.game as Record<string, unknown>;
+    expect(first).toBeDefined();
+    expect("year" in first).toBe(false);
+    expect(JSON.stringify(first)).not.toContain('"year"');
+  });
+
+  it("omits year on company and related grids too", () => {
+    for (const f of ["company.html", "related-series.html"]) {
+      const g = parseGameGrid(fixture(f), 1).items[0]?.game as Record<string, unknown>;
+      expect(g, f).toBeDefined();
+      expect("year" in g, f).toBe(false);
+    }
+  });
+
+  it("still reports a real year where the source has one", () => {
+    expect(parseGamePage(fixture("game-auth.html"), "elden-ring").year).toBe(2022);
+    const elden = parseSearchResults(fixture("search-results.html")).find(
+      (r) => r.slug === "elden-ring",
+    );
+    expect(elden?.year).toBe(2022);
+  });
+});
+
+describe("parent game (add-on content)", () => {
+  /**
+   * Replaces an always-null `category`: `.game-result-type` exists only on search-result
+   * cards, never on a game page, so that field could never be populated. This attribute
+   * is real and distinguishes a top-level game from DLC/expansions/editions.
+   */
+  it("reports null for a top-level game", () => {
+    expect(parseGamePage(fixture("game-auth.html"), "elden-ring").parentGameSlug).toBeNull();
+  });
+
+  it("reads the parent slug out of #game-page-meta", () => {
+    const html = '<div id="game-page-meta" data-game-id="1" data-game-slug="x" ' +
+      'data-parent-game-slug="elden-ring" data-name="X"></div>' +
+      '<div class="game-title-section"><h1>Shadow of the Erdtree</h1></div>';
+    expect(parseGamePage(html, "x").parentGameSlug).toBe("elden-ring");
+  });
+
+  it("keeps the precise category available from search results", () => {
+    // Backloggd prints Main Game / DLC / Expansion / Bundle only on search cards.
+    const elden = parseSearchResults(fixture("search-results.html")).find(
+      (r) => r.slug === "elden-ring",
+    );
+    expect(elden?.category).toBe("Main Game");
+  });
+});

@@ -37,7 +37,6 @@ export function parseProfile(html: string, username: string): UserProfile {
       id: intOrNull(card.attr("game_id")) ?? 0,
       slug,
       title: img.attr("alt")?.trim() || slug,
-      year: null,
       coverUrl: img.attr("data-src") ?? img.attr("src") ?? null,
       url: `${BASE_URL}/games/${slug}/`,
     });
@@ -92,7 +91,6 @@ export function parseJournal(html: string, page: number): Page<JournalEntry> {
         id: gameId,
         slug,
         title: img.attr("alt")?.trim() || row.find(".game-name a").first().text().trim() || slug,
-        year: null,
         coverUrl: img.attr("src") ?? null,
         url: `${BASE_URL}/games/${slug}/`,
       },

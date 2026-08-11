@@ -114,7 +114,7 @@ export function parseGamePage(html: string, slug: string): GameDetail {
     developers: companies,
     publishers: [],
     releaseDate: released,
-    category: $(".game-result-type").first().text().trim() || null,
+    parentGameSlug: $("#game-page-meta").attr("data-parent-game-slug")?.trim() || null,
     averageRating: agg ? Math.round(agg.value * 100) / 100 : null,
     ratingCount: agg?.count ?? null,
     playtime: parsePlaytime($),

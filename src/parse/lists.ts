@@ -66,7 +66,6 @@ export function parseListDetail(
       id: intOrNull(card.attr("game_id")) ?? 0,
       slug: s,
       title: img.attr("alt")?.trim() || s,
-      year: null,
       coverUrl: img.attr("src") ?? null,
       url: `${BASE_URL}/games/${s}/`,
     });

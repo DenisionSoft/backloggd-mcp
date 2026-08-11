@@ -29,7 +29,16 @@ export interface GameSummary {
   id: number;
   slug: string;
   title: string;
-  year: number | null;
+  /**
+   * Release year — **omitted entirely** when the source did not provide one.
+   *
+   * Backloggd's game-card grids (library, company catalogues, lists, related frames)
+   * carry only id, slug, title and cover; there is no year in that markup. Emitting
+   * `year: null` there would read as "this game has no release year", which is false,
+   * so the key is left off instead. Search results, autocomplete and game pages do
+   * carry it, and `get_games_metadata` will fill it in for a shortlist.
+   */
+  year?: number | null;
   coverUrl: string | null;
   url: string;
 }
@@ -41,7 +50,15 @@ export interface GameDetail extends GameSummary {
   developers: string[];
   publishers: string[];
   releaseDate: string | null;
-  category: string | null;
+  /**
+   * Slug of the game this one is add-on content for — DLC, an expansion, an edition —
+   * or null when it is a top-level game. Read from `#game-page-meta`.
+   *
+   * Backloggd does not print the precise category (Main Game / DLC / Expansion /
+   * Bundle) on a game page; that label exists only on search-result cards, so
+   * `search_games` is where to get it.
+   */
+  parentGameSlug: string | null;
   /** Site-wide average, on the 0.5–5 scale shown to users. */
   averageRating: number | null;
   ratingCount: number | null;

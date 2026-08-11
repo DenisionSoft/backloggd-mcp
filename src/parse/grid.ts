@@ -40,7 +40,6 @@ export function parseGameGrid(html: string, page = 1): Page<LibraryEntry> {
           img.attr("alt")?.trim() ||
           card.parent().find(".game-text-centered").first().text().trim() ||
           slug,
-        year: null,
         coverUrl: img.attr("data-src") ?? img.attr("src") ?? null,
         url: `${BASE_URL}/games/${slug}/`,
       },

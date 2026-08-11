@@ -36,6 +36,11 @@ export interface GameRef {
   id: number;
   slug: string;
   title?: string;
+  /**
+   * Release year, when resolution happened to yield one. Autocomplete and game pages
+   * return it; a bare id or slug lookup may not. Absent means unknown, not "no year".
+   */
+  year?: number | null;
 }
 
 /**
@@ -95,7 +100,7 @@ export class BackloggdApi {
         "Try the exact title, or the slug from the game's URL.",
       );
     }
-    const ref: GameRef = { id: best.id, slug: best.slug, title: best.title };
+    const ref: GameRef = { id: best.id, slug: best.slug, title: best.title, year: best.year };
     this.slugCache.set(raw.toLowerCase(), ref);
     return ref;
   }
@@ -107,7 +112,12 @@ export class BackloggdApi {
     if (!game.id && !knownId) {
       throw new BackloggdError(`Could not determine the game id for ${path}.`, "NOT_FOUND");
     }
-    return { id: game.id || (knownId as number), slug: game.slug, title: game.title };
+    return {
+      id: game.id || (knownId as number),
+      slug: game.slug,
+      title: game.title,
+      year: game.year,
+    };
   }
 
   async autocomplete(query: string) {
