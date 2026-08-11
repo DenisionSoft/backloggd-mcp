@@ -133,9 +133,13 @@ export const readTools: AnyToolDef[] = [
     description:
       "Given a list of game names, report where each one sits in your Backloggd: its shelf " +
       "(played / playing / backlog / wishlist / none), completion status, your rating, and " +
-      "which of your custom lists contain it. Built for questions like 'here are 20 games, " +
-      "which do I already have?'. Names that match no game are reported as not_found rather " +
-      "than failing the batch.",
+      "optionally which of your custom lists contain it. Built for questions like 'here " +
+      "are 20 games, which do I already have?'. Names that match no game are reported as " +
+      "not_found rather than failing the batch.\n\n" +
+      "Cost: one request per name to resolve it, plus one shared request for all the " +
+      "shelf states. Turning on include_lists adds another request per game, which on a " +
+      "slow connection can push a large batch past the client's tool-call timeout — keep " +
+      "those batches to roughly ten games, or split them.",
     inputSchema: {
       games: z
         .array(z.string().min(1))
@@ -144,10 +148,12 @@ export const readTools: AnyToolDef[] = [
         .describe("Game names, slugs or ids. Up to 40 per call."),
       include_lists: z
         .boolean()
-        .default(true)
+        .default(false)
         .describe(
-          "Include custom-list membership. Costs one extra request per game, so set false " +
-            "if you only need shelves and ratings.",
+          "Also report which of your custom lists contain each game. Off by default " +
+            "because it costs an extra request per game and roughly doubles the runtime; " +
+            "shelf, rating and like state come back either way. Turn it on when the " +
+            "question is actually about lists, and prefer batches of ~10.",
         ),
     },
     async handler(args, ctx) {
