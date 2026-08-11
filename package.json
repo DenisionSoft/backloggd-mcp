@@ -1,6 +1,6 @@
 {
   "name": "backloggd-mcp",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "MCP server for Backloggd \u2014 search games, manage your library, statuses, ratings, logs, reviews and lists as an authenticated user.",
   "type": "module",
   "bin": {

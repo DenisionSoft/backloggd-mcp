@@ -1,4 +1,6 @@
 #!/usr/bin/env node
+import { createRequire } from "node:module";
+
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 
@@ -16,7 +18,11 @@ import {
 } from "./errors.js";
 import { runSelfTest } from "./selftest.js";
 
-const VERSION = "0.1.0";
+// Read the real version rather than duplicating it — a hardcoded copy silently drifts
+// from package.json, and the version is how you tell which build a client is running.
+const VERSION = (
+  createRequire(import.meta.url)("../package.json") as { version?: string }
+).version ?? "0.0.0";
 
 async function main(): Promise<void> {
   const config = loadConfig();
