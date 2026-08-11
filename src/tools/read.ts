@@ -640,11 +640,21 @@ export const readTools: AnyToolDef[] = [
     title: "Series, DLC and editions of a game",
     description:
       "Games related to one game — its series, DLC, editions, mods or bundles — each with " +
-      "your own shelf state attached. Answers 'does this have a remaster or DLC I don't " +
-      "own'. Note that 'series' follows IGDB's collection grouping, which is narrower than " +
-      "a marketing franchise: Call of Duty's series is the classic-era games, while Modern " +
-      "Warfare and Black Ops are separate collections. For whole-franchise questions use " +
-      "browse_company on the publisher instead.",
+      "your own shelf state attached.\n\n" +
+      "NEVER use this to conclude you are missing something. It is a partial preview, and " +
+      "measured against a real library it gives false negatives:\n" +
+      "- 'series' returns AT MOST 6 entries. Doom, Donkey Kong, Mario Kart, Shinobi and " +
+      "Call of Duty all return exactly 6, which is the cap, not the franchise.\n" +
+      "- 'series' also follows IGDB's collection grouping, so Modern Warfare and Black Ops " +
+      "are not in Call of Duty's series.\n" +
+      "- 'editions' is incomplete: Ghost of Tsushima's editions omit the Director's Cut.\n" +
+      "- Editions and remasters are SEPARATE entries, so a franchise can look untracked " +
+      "while you own it under another entry (Mario Kart 8 Deluxe, not Mario Kart 8).\n\n" +
+      "Use it to surface obscure entries you would not have thought of. For 'what am I " +
+      "missing in this franchise', name the titles from your own knowledge or the web and " +
+      "pass them to check_games, which is authoritative and costs one request for the whole " +
+      "batch. To ask what a game is an edition OF, get_game's parentGameSlug is reliable — " +
+      "that direction of the link works even where this tool's does not.",
     inputSchema: {
       game: gameArg,
       section: z
