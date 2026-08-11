@@ -172,7 +172,9 @@ export const readTools: AnyToolDef[] = [
       // the caller can ask for the rest.
       const deadline = Date.now() + ctx.config.batchBudgetMs;
 
-      // Resolve first so the shelf lookup can be a single batched request.
+      // Resolve first: shelf state is the primary answer, and a truncated resolution is
+      // a clean failure (the untried names come back in notAttempted). Lists are the
+      // expensive extra and take whatever budget is left.
       const resolved: { query: string; ref: GameRef | null; error?: string }[] = [];
       const notAttempted: string[] = [];
       for (const name of names) {
@@ -204,17 +206,6 @@ export const readTools: AnyToolDef[] = [
         .withDeadline(deadline, () => ctx.api.getBatchLogs(found.map((r) => r.ref!.id)))
         .catch(() => new Map());
 
-      /*
-       * Two ways to learn list membership, with very different costs:
-       *
-       *  - per game: one request each, so 100 games is 100 requests;
-       *  - reverse index: page every list once and invert it, so the cost tracks the
-       *    number of lists and is flat in the number of games.
-       *
-       * The index wins as soon as there are more games than list pages, which for a
-       * typical account is around a dozen. Below that the per-game path avoids paying
-       * for lists the caller never asked about.
-       */
       const username = (await ctx.http.withDeadline(deadline, () =>
         ctx.session.ensureAuthenticated(),
       )).username;
@@ -236,11 +227,21 @@ export const readTools: AnyToolDef[] = [
             listsPartial = !built.complete;
           }
         } catch {
-          // Losing list membership must not lose the shelf data we already have.
           listsPartial = true;
         }
       }
 
+      /*
+       * Two ways to learn list membership, with very different costs:
+       *
+       *  - per game: one request each, so 100 games is 100 requests;
+       *  - reverse index: page every list once and invert it, so the cost tracks the
+       *    number of lists and is flat in the number of games.
+       *
+       * The index wins as soon as there are more games than list pages, which for a
+       * typical account is around a dozen. Below that the per-game path avoids paying
+       * for lists the caller never asked about.
+       */
       interface CheckResult {
         query: string;
         found: boolean;
@@ -313,13 +314,6 @@ export const readTools: AnyToolDef[] = [
           tracked,
           untracked: found.length - tracked,
           listsChecked: includeLists,
-          listStrategy: !includeLists
-            ? "skipped"
-            : useIndex
-              ? "index"
-              : listsPartial
-                ? "unavailable"
-                : "per-game",
           // The index ran out of time, so list membership is under-reported: a game
           // shown with no lists might be in one of the lists that was never scanned.
           ...(listsPartial
@@ -483,16 +477,19 @@ export const readTools: AnyToolDef[] = [
     },
     async handler(args, ctx) {
       const username = await resolveUsername(args["username"] as string | undefined, ctx);
-      const result = await ctx.api.exportLibrary(
-        username,
-        {
-          shelf: args["shelf"] as LibraryQuery["shelf"],
-          releasePlatform: args["release_platform"] as string | undefined,
-          genre: args["genre"] as string | undefined,
-          releaseYear: args["release_year"] as string | undefined,
-          completionStatus: args["completion_status"] as LibraryQuery["completionStatus"],
-        },
-        args["max_games"] as number,
+      const deadline = Date.now() + ctx.config.batchBudgetMs;
+      const result = await ctx.http.withDeadline(deadline, () =>
+        ctx.api.exportLibrary(
+          username,
+          {
+            shelf: args["shelf"] as LibraryQuery["shelf"],
+            releasePlatform: args["release_platform"] as string | undefined,
+            genre: args["genre"] as string | undefined,
+            releaseYear: args["release_year"] as string | undefined,
+            completionStatus: args["completion_status"] as LibraryQuery["completionStatus"],
+          },
+          args["max_games"] as number,
+        ),
       );
       return {
         games: result.items.map((i) => ({
@@ -681,11 +678,17 @@ export const readTools: AnyToolDef[] = [
     async handler(args, ctx) {
       const names = args["games"] as string[];
       const withPlaytime = args["include_playtime"] as boolean;
+      const deadline = Date.now() + ctx.config.batchBudgetMs;
       const results = [];
+      const notAttempted: string[] = [];
       for (const name of names) {
+        if (Date.now() > deadline) {
+          notAttempted.push(name);
+          continue;
+        }
         try {
-          const ref = await ctx.api.resolveGame(name);
-          const g = await ctx.api.getGame(ref);
+          const ref = await ctx.http.withDeadline(deadline, () => ctx.api.resolveGame(name));
+          const g = await ctx.http.withDeadline(deadline, () => ctx.api.getGame(ref));
           results.push({
             query: name,
             found: true,
@@ -707,7 +710,18 @@ export const readTools: AnyToolDef[] = [
           });
         }
       }
-      return { results, requested: names.length, requestsUsed: names.length };
+      return {
+        results,
+        requested: names.length,
+        requestsUsed: results.length,
+        ...(notAttempted.length > 0
+          ? {
+              incomplete: true,
+              notAttempted,
+              note: "Ran out of time; call again with just these names (already-fetched games are cached).",
+            }
+          : {}),
+      };
     },
   }),
 
@@ -736,6 +750,7 @@ export const readTools: AnyToolDef[] = [
       max_games: z.number().int().min(1).max(2000).default(600),
     },
     async handler(args, ctx) {
+      const deadline = Date.now() + ctx.config.batchBudgetMs;
       const username = (await ctx.session.ensureAuthenticated()).username;
       const platform = args["release_platform"] as string | undefined;
       const genre = args["genre"] as string | undefined;
@@ -753,14 +768,12 @@ export const readTools: AnyToolDef[] = [
       };
       const byId = new Map<number, Hit>();
 
-      const shelfResult = await ctx.api.exportLibrary(
-        username,
-        {
-          shelf: args["shelf"] as never,
-          releasePlatform: platform,
-          genre,
-        },
-        max,
+      const shelfResult = await ctx.http.withDeadline(deadline, () =>
+        ctx.api.exportLibrary(
+          username,
+          { shelf: args["shelf"] as never, releasePlatform: platform, genre },
+          max,
+        ),
       );
       for (const item of shelfResult.items) {
         byId.set(item.game.id, {
@@ -775,11 +788,18 @@ export const readTools: AnyToolDef[] = [
       }
 
       let listsScanned = 0;
+      let listsComplete = true;
       if (args["include_lists"] as boolean) {
-        const lists = await ctx.api.getLists(username, 1);
+        const lists = await ctx.http.withDeadline(deadline, () => ctx.api.getLists(username, 1));
         for (const list of lists.items) {
+          if (Date.now() > deadline) {
+            listsComplete = false;
+            break;
+          }
           listsScanned += 1;
-          const detail = await ctx.api.getList(username, list.slug, 1);
+          const detail = await ctx.http.withDeadline(deadline, () =>
+            ctx.api.getList(username, list.slug, 1),
+          );
           for (const g of detail.games) {
             const existing = byId.get(g.id);
             if (existing) {
@@ -808,6 +828,14 @@ export const readTools: AnyToolDef[] = [
           total: hits.length,
           fromShelves: hits.filter((h) => h.shelves.length > 0).length,
           listsScanned,
+          ...(listsComplete
+            ? {}
+            : {
+                incomplete: true,
+                incompleteNote:
+                  "Ran out of time before scanning every list, so this is not the full " +
+                  "picture — a game missing here may still be in an unscanned list.",
+              }),
           note:
             platform || genre
               ? "Platform/genre filters were applied server-side to shelves only; list-only " +
