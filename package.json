@@ -1,0 +1,49 @@
+{
+  "name": "backloggd-mcp",
+  "version": "0.1.0",
+  "description": "MCP server for Backloggd — search games, manage your library, statuses, ratings, logs, reviews and lists as an authenticated user.",
+  "type": "module",
+  "bin": {
+    "backloggd-mcp": "dist/index.js"
+  },
+  "main": "dist/index.js",
+  "files": [
+    "dist",
+    "README.md",
+    "LICENSE"
+  ],
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.json && chmod +x dist/index.js",
+    "dev": "tsc -p tsconfig.json --watch",
+    "start": "node dist/index.js",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "selftest": "node dist/index.js --selftest",
+    "prepublishOnly": "npm run build && npm test"
+  },
+  "keywords": [
+    "mcp",
+    "model-context-protocol",
+    "backloggd",
+    "games",
+    "backlog",
+    "game-tracker"
+  ],
+  "license": "MIT",
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.12.0",
+    "cheerio": "^1.0.0",
+    "tough-cookie": "^5.1.0",
+    "undici": "^7.3.0",
+    "zod": "^3.24.0"
+  },
+  "devDependencies": {
+    "@types/node": "^22.10.0",
+    "typescript": "^5.7.0",
+    "vitest": "^2.1.0"
+  }
+}
