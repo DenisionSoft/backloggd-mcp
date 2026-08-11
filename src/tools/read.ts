@@ -240,9 +240,9 @@ export const readTools: AnyToolDef[] = [
       "This is the main discovery tool: combine a shelf with a release platform, genre, " +
       "year, completion status or rating, and sort by anything including how long games " +
       "take to finish.\n\n" +
-      "Examples: shelf='backlog' + sort='avg-finish-time' answers 'what's the shortest " +
-      "thing in my backlog'; shelf='backlog' + release_platform='PS5' answers 'what do I " +
-      "have that runs on PS5'; sort='shuffle' picks at random.\n\n" +
+      "Examples: shelf='backlog' + release_platform='PS5' answers 'what do I have that " +
+      "runs on PS5'; sort='shuffle' picks at random; sort='avg-finish-time' ranks by how " +
+      "long games take (LONGEST first by default — see the sort notes).\n\n" +
       "An empty result means nothing matched — invalid filter values are rejected before " +
       "the request is sent, so a zero-row answer is trustworthy.",
     inputSchema: {
@@ -285,8 +285,12 @@ export const readTools: AnyToolDef[] = [
         .describe("'games' excludes DLC and other extras."),
       sort: z.enum(LIBRARY_SORTS as [string, ...string[]]).optional()
         .describe(
-          "avg-finish-time = shortest first; shuffle = random; user-rating = your score; " +
-            "rating = community score.",
+          "shuffle = random pick; user-rating = your score; rating = community score. " +
+            "avg-finish-time / avg-play-time rank by community playtime and default to " +
+            "LONGEST first. Do NOT use order='asc' to find short games: ascending puts " +
+            "games with NO recorded finish time first (MMOs, live-service and obscure " +
+            "titles), not genuinely short ones. To actually find short games, take an " +
+            "ascending page and check real hours with get_games_metadata.",
         ),
       order: z.enum(["asc", "desc"]).optional(),
       page: pageArg,
