@@ -1,6 +1,6 @@
 import { z } from "zod";
 import { defineTool, type AnyToolDef } from "./types.js";
-import type { GameRef } from "../api/index.js";
+import { requireSlug, type GameRef } from "../api/index.js";
 import { GENRES, PLATFORMS } from "../vocab.js";
 import { LIBRARY_SORTS } from "../filters.js";
 import type { LibraryQuery } from "../filters.js";
@@ -72,17 +72,28 @@ export const readTools: AnyToolDef[] = [
       const results = await ctx.api.searchGames(query, limit);
       if (!includeStatus || results.length === 0) return { results };
 
-      const states = await ctx.api.getBatchLogs(results.map((r) => r.id));
+      // Same rule as check_games: if the shelf lookup fails, say so rather than
+      // reporting every hit as untracked.
+      let shelfVerified = true;
+      const states = await ctx.api.getBatchLogs(results.map((r) => r.id)).catch(() => {
+        shelfVerified = false;
+        return new Map<number, never>();
+      });
+
       return {
         results: results.map((r) => {
           const s = states.get(r.id);
           return {
             ...r,
-            yourStatus: s?.status ?? "none",
-            yourRating: s?.rating ?? null,
-            youLiked: s?.liked ?? false,
+            yourStatus: shelfVerified ? (s?.status ?? "none") : "unknown",
+            yourRating: shelfVerified ? (s?.rating ?? null) : null,
+            youLiked: shelfVerified ? (s?.liked ?? false) : false,
           };
         }),
+        shelfVerified,
+        ...(shelfVerified
+          ? {}
+          : { shelfNote: "Shelf lookup failed; yourStatus is 'unknown', not 'none'." }),
       };
     },
   }),
@@ -137,6 +148,10 @@ export const readTools: AnyToolDef[] = [
       "optionally which of your custom lists contain it. Built for questions like 'here " +
       "are 20 games, which do I already have?'. Names that match no game are reported as " +
       "not_found rather than failing the batch.\n\n" +
+      "Where a title matches several distinct games the best candidate is used and the " +
+      "others come back in `ambiguousAlternatives` — check that field before trusting a " +
+      "row, and pin it with \"Title (year)\" if it picked wrong. Write tools refuse " +
+      "ambiguous titles outright rather than guessing.\n\n" +
       "Cost: one request per name to resolve it, plus one shared request for all the " +
       "shelf states. include_lists adds list membership; for a large batch it pages your " +
       "lists once and inverts them rather than asking per game, so it stays affordable.\n\n" +
@@ -158,19 +173,39 @@ export const readTools: AnyToolDef[] = [
         .default(false)
         .describe(
           "Also report which of your custom lists contain each game. Off by default " +
-            "because it costs an extra request per game and roughly doubles the runtime; " +
-            "shelf, rating and like state come back either way. Turn it on when the " +
-            "question is actually about lists, and prefer batches of ~10.",
+            "because it costs extra requests; shelf, rating and like state come back " +
+            "either way. Safe for large batches — once the batch is bigger than your " +
+            "list count the cost stops growing with it.",
+        ),
+      include_editions: z
+        .boolean()
+        .default(false)
+        .describe(
+          "Also look for OTHER Backloggd entries of the same game that you track — the " +
+            "Director's Cut, a Deluxe edition, a remaster. Backloggd files each of those " +
+            "as a separate game, so a title can look untracked while you own it under a " +
+            "different entry (Ghost of Tsushima vs its Director's Cut; Mario Kart 8 vs " +
+            "8 Deluxe). Costs one search per game, so use it when a 'no' would otherwise " +
+            "be misleading.",
         ),
     },
     async handler(args, ctx) {
       const names = args["games"] as string[];
       const includeLists = args["include_lists"] as boolean;
+      const includeEditions = args["include_editions"] as boolean;
 
-      // Stop before the MCP client's tool-call timeout rather than blowing through it.
-      // Exceeding it loses the entire result; stopping early loses only the tail, and
-      // the caller can ask for the rest.
+      /*
+       * Two budgets, not one.
+       *
+       * Shelf state is the answer; list membership is the garnish. Sharing a single
+       * budget meant slow resolution could eat everything and leave names entirely
+       * unresolved — the worst degradation, since the caller gets nothing for them.
+       * Resolution and the shelf batch therefore get the full budget, and lists get
+       * only whatever survives. Degradation now reliably yields complete shelves with
+       * partial lists rather than the reverse.
+       */
       const deadline = Date.now() + ctx.config.batchBudgetMs;
+      const listsDeadline = deadline;
 
       // Resolve first: shelf state is the primary answer, and a truncated resolution is
       // a clean failure (the untried names come back in notAttempted). Lists are the
@@ -202,9 +237,22 @@ export const readTools: AnyToolDef[] = [
       }
 
       const found = resolved.filter((r) => r.ref !== null);
+
+      /*
+       * Whether the shelf-state request actually succeeded.
+       *
+       * This used to be `.catch(() => new Map())`, which combined with a `?? "none"`
+       * downstream to report every game as untracked whenever the request failed —
+       * confidently, and indistinguishably from the truth. Wrong data is worse than no
+       * data, so the failure is now carried through to every entry.
+       */
+      let shelfVerified = true;
       const states = await ctx.http
         .withDeadline(deadline, () => ctx.api.getBatchLogs(found.map((r) => r.ref!.id)))
-        .catch(() => new Map());
+        .catch(() => {
+          shelfVerified = false;
+          return new Map<number, never>();
+        });
 
       const username = (await ctx.http.withDeadline(deadline, () =>
         ctx.session.ensureAuthenticated(),
@@ -216,12 +264,12 @@ export const readTools: AnyToolDef[] = [
       if (includeLists) {
         try {
           const listCount = (
-            await ctx.http.withDeadline(deadline, () => ctx.api.getLists(username, 1))
+            await ctx.http.withDeadline(listsDeadline, () => ctx.api.getLists(username, 1))
           ).items.length;
           useIndex = found.length > listCount;
           if (useIndex) {
-            const built = await ctx.http.withDeadline(deadline, () =>
-              ctx.api.getListMembershipIndex(username, deadline),
+            const built = await ctx.http.withDeadline(listsDeadline, () =>
+              ctx.api.getListMembershipIndex(username, listsDeadline),
             );
             listIndex = built.index;
             listsPartial = !built.complete;
@@ -250,11 +298,23 @@ export const readTools: AnyToolDef[] = [
         /** Omitted when resolution did not yield a year — never nulled. */
         year?: number;
         url?: string;
+        /** "unknown" when the shelf lookup failed — never silently "none". */
         status?: string;
+        /** False means the shelf fields below are unverified and must not be trusted. */
+        shelfVerified?: boolean;
         playedStatus?: string | null;
         rating?: number | null;
         liked?: boolean;
         lists?: { id: number; name: string; url: string | null }[];
+        /** False means list membership was not confirmed; `lists: []` proves nothing. */
+        listsVerified?: boolean;
+        /** Other Backloggd entries of the same game that you do track. */
+        trackedEditions?: { title: string; slug: string; category: string | null; status: string }[];
+        /**
+         * Present when the title matched several distinct games and one was chosen.
+         * Check these before trusting the row — and disambiguate with "Title (year)".
+         */
+        ambiguousAlternatives?: { id: number; slug: string; title: string; year: number | null }[];
         untracked?: boolean;
       }
 
@@ -269,10 +329,10 @@ export const readTools: AnyToolDef[] = [
         let lists: { id: number; name: string; url: string | null }[] | undefined;
         if (listIndex) {
           lists = listIndex.get(item.ref.id) ?? [];
-        } else if (includeLists && Date.now() <= deadline) {
+        } else if (includeLists && Date.now() <= listsDeadline) {
           try {
             lists = (
-              await ctx.http.withDeadline(deadline, () =>
+              await ctx.http.withDeadline(listsDeadline, () =>
                 ctx.api.getGameListMembership(item.ref!.id),
               )
             )
@@ -285,6 +345,44 @@ export const readTools: AnyToolDef[] = [
           listsPartial = true;
         }
 
+        const listsVerified = includeLists && !listsPartial && lists !== undefined;
+
+        // Sibling entries: same game, different Backloggd record. Uses search rather
+        // than parentGameSlug (which only points child->parent) or the editions frame
+        // (which omits the Director's Cut outright). Search returns the whole family
+        // with category labels and shelf state in one request; it also returns
+        // unrelated titles, so match on the base title.
+        let trackedEditions: CheckResult["trackedEditions"];
+        if (includeEditions && Date.now() <= deadline) {
+          try {
+            const base = normaliseForEdition(item.ref.title ?? item.query);
+            const hits = await ctx.http.withDeadline(deadline, () =>
+              ctx.api.searchGames(item.ref!.title ?? item.query, 12),
+            );
+            const siblings = hits.filter(
+              (h) => h.id !== item.ref!.id && normaliseForEdition(h.title).startsWith(base),
+            );
+            if (siblings.length > 0) {
+              const sibStates = await ctx.http
+                .withDeadline(deadline, () => ctx.api.getBatchLogs(siblings.map((h) => h.id)))
+                .catch(() => new Map<number, never>());
+              trackedEditions = siblings
+                .filter((h) => {
+                  const st = sibStates.get(h.id);
+                  return st && st.status !== "none";
+                })
+                .map((h) => ({
+                  title: h.title,
+                  slug: h.slug,
+                  category: h.category,
+                  status: sibStates.get(h.id)!.status,
+                }));
+            }
+          } catch {
+            // An edition probe failing must not cost us the shelf answer.
+          }
+        }
+
         results.push({
           query: item.query,
           found: true,
@@ -293,14 +391,22 @@ export const readTools: AnyToolDef[] = [
           // rather than nulled when the lookup did not yield one.
           ...(item.ref.year != null ? { year: item.ref.year } : {}),
           url: `https://backloggd.com/games/${item.ref.slug}/`,
-          status: state?.status ?? "none",
-          playedStatus: state?.playedStatus ?? null,
-          rating: state?.rating ?? null,
-          liked: state?.liked ?? false,
-          lists,
-          // True when the game is on no shelf and in no list at all.
+          // "none" is only ever asserted when the lookup that could disprove it ran.
+          status: shelfVerified ? (state?.status ?? "none") : "unknown",
+          shelfVerified,
+          playedStatus: shelfVerified ? (state?.playedStatus ?? null) : null,
+          rating: shelfVerified ? (state?.rating ?? null) : null,
+          liked: shelfVerified ? (state?.liked ?? false) : false,
+          ...(includeLists ? { lists: lists ?? [], listsVerified } : {}),
+          ...(trackedEditions && trackedEditions.length > 0 ? { trackedEditions } : {}),
+          ...(item.ref.alternatives?.length
+            ? { ambiguousAlternatives: item.ref.alternatives }
+            : {}),
+          // Only claim "untracked" when both halves were actually checked.
           untracked:
-            (state?.status ?? "none") === "none" && (lists === undefined || lists.length === 0),
+            shelfVerified &&
+            (state?.status ?? "none") === "none" &&
+            (!includeLists || (listsVerified && (lists?.length ?? 0) === 0)),
         });
       }
 
@@ -314,6 +420,15 @@ export const readTools: AnyToolDef[] = [
           tracked,
           untracked: found.length - tracked,
           listsChecked: includeLists,
+          shelfVerified,
+          ...(shelfVerified
+            ? {}
+            : {
+                shelfNote:
+                  "The shelf-state request failed, so every entry reports status " +
+                  "'unknown'. These games may well be on your shelves — retry rather " +
+                  "than treating this as 'not in library'.",
+              }),
           // The index ran out of time, so list membership is under-reported: a game
           // shown with no lists might be in one of the lists that was never scanned.
           ...(listsPartial
@@ -579,7 +694,7 @@ export const readTools: AnyToolDef[] = [
     inputSchema: { game: gameArg, page: pageArg },
     async handler(args, ctx) {
       const ref = await ctx.api.resolveGame(args["game"] as string);
-      return ctx.api.getGameReviews(ref.slug, args["page"] as number);
+      return ctx.api.getGameReviews(requireSlug(ref), args["page"] as number);
     },
   }),
 
@@ -948,9 +1063,10 @@ export const readTools: AnyToolDef[] = [
     },
     async handler(args, ctx) {
       const ref = await ctx.api.resolveGame(args["game"] as string);
+      const slug = requireSlug(ref);
       const username = args["username"] as string | undefined;
-      if (username) return ctx.api.getUserGameLogs(username, ref.slug, args["page"] as number);
-      return ctx.api.getGameLogs(ref.slug, {
+      if (username) return ctx.api.getUserGameLogs(username, slug, args["page"] as number);
+      return ctx.api.getGameLogs(slug, {
         friendsOnly: args["friends_only"] as boolean,
         ratingStars: args["rating"] as number | undefined,
         page: args["page"] as number,
@@ -991,3 +1107,16 @@ export const readTools: AnyToolDef[] = [
     },
   }),
 ];
+
+/**
+ * Normalise a title for sibling matching: an edition's name starts with the base
+ * game's, so a prefix test on this form separates "Ghost of Tsushima: Director's Cut"
+ * from "Tom Clancy's Ghost Recon", which the same search also returns.
+ */
+function normaliseForEdition(title: string): string {
+  return title
+    .normalize("NFD")
+    .replace(/[\u0300-\u036f]/g, "")
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, "");
+}

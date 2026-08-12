@@ -3,7 +3,7 @@ import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
 
-import { parseGamePage } from "../src/parse/game-page.js";
+import { parseGamePage, isGameNotFoundPage } from "../src/parse/game-page.js";
 import { parseLibraryPage } from "../src/parse/library.js";
 import { parseAutocomplete, parseSearchResults } from "../src/parse/search.js";
 import { parseListsPage } from "../src/parse/lists.js";
@@ -14,6 +14,7 @@ import { parseUserLists } from "../src/parse/user-lists.js";
 import { parseGameGrid, parseCompanyName } from "../src/parse/grid.js";
 import { parseActivity, parseFollowList, parseNotifications } from "../src/parse/social.js";
 import { PLAYED_STATUS_IDS, ratingToStars, starsToWire } from "../src/types.js";
+import { NotFoundError, ParseError } from "../src/errors.js";
 
 const FIXTURES = join(dirname(fileURLToPath(import.meta.url)), "fixtures");
 const fixture = (name: string): string => readFileSync(join(FIXTURES, name), "utf8");
@@ -410,5 +411,48 @@ describe("parent game (add-on content)", () => {
       (r) => r.slug === "elden-ring",
     );
     expect(elden?.category).toBe("Main Game");
+  });
+});
+
+describe("error pages must never parse as games", () => {
+  /**
+   * Backloggd serves "game not found" with HTTP 200 and a page full of recommendation
+   * cards. A parser that keeps going scrapes a game_id off one of those cards, which is
+   * how resolveGame("119133") once returned game 3668 — a different game entirely, on
+   * write paths included.
+   */
+  const notFound =
+    '<html><head><title>Game not found</title></head><body>' +
+    '<h1>Welp, this is awkward...</h1>' +
+    '<div class="card game-cover" game_id="3668"></div>' +
+    '<div class="card game-cover" game_id="10628"></div>' +
+    "</body></html>";
+
+  it("recognises the not-found page structurally", () => {
+    expect(isGameNotFoundPage(notFound)).toBe(true);
+    expect(isGameNotFoundPage(fixture("game-auth.html"))).toBe(false);
+  });
+
+  it("throws rather than returning a recommendation card's game", () => {
+    expect(() => parseGamePage(notFound, "673")).toThrow(NotFoundError);
+    try {
+      parseGamePage(notFound, "673");
+    } catch (err) {
+      // The wrong-answer id must not appear anywhere in what the caller sees.
+      expect(JSON.stringify(err)).not.toContain("3668");
+    }
+  });
+});
+
+describe("batch log parsing signals failure", () => {
+  it("throws on unparseable input instead of returning an empty map", () => {
+    // An empty map is a meaningful answer ("none of these are tracked"), so producing
+    // one from a failed request is a confident lie about someone's library.
+    expect(() => parseBatchLogs("<html>gateway timeout</html>")).toThrow(ParseError);
+    expect(() => parseBatchLogs("null")).toThrow(ParseError);
+  });
+
+  it("still treats a genuinely empty response as 'nothing tracked'", () => {
+    expect(parseBatchLogs("{}").size).toBe(0);
   });
 });

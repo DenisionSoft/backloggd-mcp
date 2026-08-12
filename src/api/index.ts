@@ -1,5 +1,5 @@
 import { BASE_URL } from "../config.js";
-import { BackloggdError, HttpError } from "../errors.js";
+import { AmbiguousError, BackloggdError, HttpError, NotFoundError } from "../errors.js";
 import { CACHE_TTL, TtlCache } from "../cache.js";
 import type { HttpClient } from "../http/client.js";
 import type { SessionManager } from "../auth/session.js";
@@ -34,8 +34,22 @@ import {
 
 export interface GameRef {
   id: number;
-  slug: string;
+  /**
+   * URL slug. **Absent when the caller supplied a bare numeric id**: Backloggd's game
+   * URLs are slug-only (`/games/119133/` serves a "not found" page even though 119133
+   * is a real id), and there is no cheap id→slug lookup. Id-keyed operations — shelf
+   * state, logging, rating — work fine without it; anything that needs a page does not.
+   */
+  slug?: string;
   title?: string;
+  /**
+   * Other games sharing this exact title, when the name was not unique.
+   *
+   * Present means the pick was a judgement call. Reads carry on with the best candidate
+   * and surface these so the answer is not silently wrong; writes refuse, because
+   * shelving the wrong Donkey Kong is not something the user can see happening.
+   */
+  alternatives?: { id: number; slug: string; title: string; year: number | null }[];
   /**
    * Release year, when resolution happened to yield one. Autocomplete and game pages
    * return it; a bare id or slug lookup may not. Absent means unknown, not "no year".
@@ -76,10 +90,13 @@ export class BackloggdApi {
     const cached = this.slugCache.get(raw.toLowerCase());
     if (cached) return cached;
 
-    // A bare number is an id; we still need the slug for URLs, and the game page
-    // redirects id → slug for us.
+    // A bare number is a game id. It is NOT a URL segment: `/games/{id}/` returns
+    // Backloggd's "not found" page with a 200, and parsing that scrapes an unrelated
+    // game's id off a recommendation card — which previously made resolveGame("119133")
+    // return game 3668, i.e. the wrong game, on write paths included. Take the id at
+    // face value instead and leave the slug unknown.
     if (/^\d+$/.test(raw)) {
-      const ref = await this.refFromGamePage(`/games/${raw}/`, Number.parseInt(raw, 10));
+      const ref: GameRef = { id: Number.parseInt(raw, 10) };
       this.slugCache.set(raw.toLowerCase(), ref);
       return ref;
     }
@@ -95,16 +112,67 @@ export class BackloggdApi {
       }
     }
 
-    const hits = await this.autocomplete(raw);
-    const best = hits[0];
-    if (!best) {
-      throw new BackloggdError(
+    // `Title (1994)` pins one of several same-named games.
+    const yearHint = /\((\d{4})\)\s*$/.exec(raw)?.[1];
+    const query = yearHint ? raw.replace(/\s*\(\d{4}\)\s*$/, "").trim() : raw;
+
+    let hits = await this.autocomplete(query);
+
+    // Backloggd's index is inconsistent about diacritics: "Ōkami" matches with the
+    // macron, while "Ghost of Yōtei" and "Pokémon Red" both return nothing until the
+    // marks are stripped. So fold only as a fallback — folding first would break the
+    // titles that need the marks.
+    if (hits.length === 0) {
+      const folded = foldDiacritics(query);
+      if (folded !== query) hits = await this.autocomplete(folded);
+    }
+
+    if (hits.length === 0) {
+      throw new NotFoundError(
         `No game on Backloggd matches "${raw}".`,
-        "NOT_FOUND",
         "Try the exact title, or the slug from the game's URL.",
       );
     }
+
+    if (yearHint) {
+      const byYear = hits.filter((h) => String(h.year) === yearHint);
+      if (byYear.length === 0) {
+        throw new NotFoundError(
+          `No game called "${query}" was released in ${yearHint}.`,
+          `Candidates: ${hits.slice(0, 6).map((h) => `${h.title} (${h.year ?? "?"})`).join(", ")}.`,
+        );
+      }
+      hits = byYear;
+    }
+
+    /*
+     * Prefer an exact title match over autocomplete's ordering.
+     *
+     * Position is not relevance: asking for "Donkey Kong (1982)" put *Donkey Kong
+     * Junior* first, and taking hits[0] returned it. Narrowing to exact matches before
+     * choosing means a precise query resolves precisely, and the ambiguity check below
+     * compares the candidates that actually share the requested name.
+     */
+    const exact = hits.filter((h) => normaliseTitle(h.title) === normaliseTitle(query));
+    const pool = exact.length > 0 ? exact : hits;
+    const best = pool[0] as (typeof hits)[number];
+
+    // Several distinct games share a title (Donkey Kong 1981 vs 1994). Silently taking
+    // the first match is how the wrong entry ends up in someone's library, so surface
+    // the collision instead and let the caller pin it with `Title (year)`.
+    // Note this runs even when a year was given: Backloggd lists three separate games
+    // called "Donkey Kong (1982)", so a year narrows the field without always settling
+    // it. Falling back to hits[0] there would reintroduce exactly the silent pick this
+    // is meant to prevent — the caller gets the candidates and can name a slug.
+    const rivals = pool.filter(
+      (h) => normaliseTitle(h.title) === normaliseTitle(best.title) && h.id !== best.id,
+    );
     const ref: GameRef = { id: best.id, slug: best.slug, title: best.title, year: best.year };
+    if (rivals.length > 0) {
+      ref.alternatives = rivals
+        .slice(0, 5)
+        .map((h) => ({ id: h.id, slug: h.slug, title: h.title, year: h.year }));
+    }
     this.slugCache.set(raw.toLowerCase(), ref);
     return ref;
   }
@@ -155,9 +223,10 @@ export class BackloggdApi {
   }
 
   async getGame(ref: GameRef): Promise<GameDetail> {
-    return this.gameCache.wrap(ref.slug, async () => {
-      const res = await this.http.fetch(`/games/${ref.slug}/`);
-      return parseGamePage(res.body, ref.slug);
+    const slug = requireSlug(ref);
+    return this.gameCache.wrap(slug, async () => {
+      const res = await this.http.fetch(`/games/${slug}/`);
+      return parseGamePage(res.body, slug);
     });
   }
 
@@ -818,4 +887,52 @@ export class BackloggdApi {
     // including the record of which lists were already scanned.
     this.listIndexCache.clear();
   }
+}
+
+/**
+ * Refuse an ambiguous reference before writing through it.
+ *
+ * Reads tolerate a best guess because a wrong row is visible in the answer and costs
+ * nothing to correct. A write is different: shelving or rating the wrong Donkey Kong
+ * leaves no trace for the user to notice, so anything that mutates the account demands
+ * an unambiguous target.
+ */
+export function assertUnambiguous(ref: GameRef, query: string): GameRef {
+  if (!ref.alternatives || ref.alternatives.length === 0) return ref;
+  const all = [{ id: ref.id, slug: ref.slug ?? "", title: ref.title ?? query, year: ref.year ?? null }, ...ref.alternatives];
+  throw new AmbiguousError(
+    `"${query}" matches ${all.length} different games, so this write was not performed.`,
+    all,
+  );
+}
+
+/**
+ * Demand a slug, with an explanation when there isn't one.
+ *
+ * A ref resolved from a bare numeric id has no slug and cannot address a page, because
+ * Backloggd's game URLs are slug-only. Failing here is the honest outcome: the
+ * alternative was fetching `/games/{id}/`, getting a 200 "not found" page, and
+ * reporting whatever game happened to be in its recommendation carousel.
+ */
+export function requireSlug(ref: GameRef): string {
+  if (ref.slug) return ref.slug;
+  throw new BackloggdError(
+    `Game ${ref.id} was given as a numeric id, and this operation needs its page.`,
+    "NEEDS_SLUG",
+    "Backloggd game URLs use slugs, not ids, and there is no cheap id-to-slug lookup. " +
+      "Pass the title or slug instead. Shelf state, rating and logging all work from " +
+      "the id alone, so those tools are unaffected.",
+  );
+}
+
+/** Strip combining marks so "Yōtei" can be retried as "Yotei". */
+function foldDiacritics(value: string): string {
+  return value.normalize("NFD").replace(/[\u0300-\u036f]/g, "");
+}
+
+/** Compare titles ignoring case, punctuation and diacritics. */
+function normaliseTitle(value: string | undefined): string {
+  return foldDiacritics(value ?? "")
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, "");
 }

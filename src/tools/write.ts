@@ -1,6 +1,7 @@
 import { z } from "zod";
 import { defineTool, type AnyToolDef } from "./types.js";
 import { consumeConfirmation, issueConfirmation } from "../confirm.js";
+import { assertUnambiguous } from "../api/index.js";
 import { BackloggdError, ConfirmationRequiredError } from "../errors.js";
 import type { ListType, PlayedStatus } from "../types.js";
 
@@ -33,7 +34,10 @@ export const writeTools: AnyToolDef[] = [
         .describe("Target shelf. 'none' removes it from all shelves."),
     },
     async handler(args, ctx) {
-      const ref = await ctx.api.resolveGame(args["game"] as string);
+      const ref = assertUnambiguous(
+        await ctx.api.resolveGame(args["game"] as string),
+        args["game"] as string,
+      );
       const entry = await ctx.api.setStatus(ref.id, args["status"] as never);
       return { game: ref, entry, message: `${ref.title ?? ref.slug} → ${entry.status}` };
     },
@@ -51,7 +55,10 @@ export const writeTools: AnyToolDef[] = [
       status: z.enum(["played", "completed", "retired", "shelved", "abandoned"]),
     },
     async handler(args, ctx) {
-      const ref = await ctx.api.resolveGame(args["game"] as string);
+      const ref = assertUnambiguous(
+        await ctx.api.resolveGame(args["game"] as string),
+        args["game"] as string,
+      );
       const entry = await ctx.api.setPlayedStatus(ref.id, args["status"] as PlayedStatus);
       return { game: ref, entry };
     },
@@ -81,7 +88,10 @@ export const writeTools: AnyToolDef[] = [
           "Use 0.5, 1, 1.5, … 5.",
         );
       }
-      const ref = await ctx.api.resolveGame(args["game"] as string);
+      const ref = assertUnambiguous(
+        await ctx.api.resolveGame(args["game"] as string),
+        args["game"] as string,
+      );
       const entry = await ctx.api.rateGame(ref.id, stars);
       return { game: ref, entry, message: `Rated ${ref.title ?? ref.slug} ${stars}/5` };
     },
@@ -94,7 +104,10 @@ export const writeTools: AnyToolDef[] = [
     write: true,
     inputSchema: { game: gameArg, liked: z.boolean() },
     async handler(args, ctx) {
-      const ref = await ctx.api.resolveGame(args["game"] as string);
+      const ref = assertUnambiguous(
+        await ctx.api.resolveGame(args["game"] as string),
+        args["game"] as string,
+      );
       const entry = await ctx.api.setLike(ref.id, args["liked"] as boolean);
       return { game: ref, entry };
     },
@@ -135,7 +148,10 @@ export const writeTools: AnyToolDef[] = [
       if (stars !== undefined && Math.round(stars * 2) !== stars * 2) {
         throw new BackloggdError(`Rating must be in half-star steps; got ${stars}.`, "BAD_INPUT");
       }
-      const ref = await ctx.api.resolveGame(args["game"] as string);
+      const ref = assertUnambiguous(
+        await ctx.api.resolveGame(args["game"] as string),
+        args["game"] as string,
+      );
       const log = await ctx.api.saveLog({
         gameId: ref.id,
         playthroughId: args["playthrough_id"] as number | undefined,
@@ -173,7 +189,10 @@ export const writeTools: AnyToolDef[] = [
       if (add.length === 0 && remove.length === 0) {
         throw new BackloggdError("Nothing to do: no lists given.", "BAD_INPUT");
       }
-      const ref = await ctx.api.resolveGame(args["game"] as string);
+      const ref = assertUnambiguous(
+        await ctx.api.resolveGame(args["game"] as string),
+        args["game"] as string,
+      );
       await ctx.api.updateGameLists(ref.id, add, remove);
       return { game: ref, added: add, removed: remove };
     },
@@ -262,7 +281,10 @@ export const writeTools: AnyToolDef[] = [
         .describe("Completion status reached in this session."),
     },
     async handler(args, ctx) {
-      const ref = await ctx.api.resolveGame(args["game"] as string);
+      const ref = assertUnambiguous(
+        await ctx.api.resolveGame(args["game"] as string),
+        args["game"] as string,
+      );
       const log = await ctx.api.getGameLog(ref.id);
 
       let playthroughId = args["playthrough_id"] as number | undefined;
@@ -348,7 +370,10 @@ export const writeTools: AnyToolDef[] = [
     write: true,
     inputSchema: { game: gameArg },
     async handler(args, ctx) {
-      const ref = await ctx.api.resolveGame(args["game"] as string);
+      const ref = assertUnambiguous(
+        await ctx.api.resolveGame(args["game"] as string),
+        args["game"] as string,
+      );
       await ctx.api.addFavorite(ref.id);
       return { game: ref, favorited: true };
     },
@@ -416,7 +441,10 @@ export const writeTools: AnyToolDef[] = [
     destructive: true,
     inputSchema: { game: gameArg, confirmation_token: confirmArg },
     async handler(args, ctx) {
-      const ref = await ctx.api.resolveGame(args["game"] as string);
+      const ref = assertUnambiguous(
+        await ctx.api.resolveGame(args["game"] as string),
+        args["game"] as string,
+      );
       const log = await ctx.api.getGameLog(ref.id);
 
       if (log.entry.rating === null) {
@@ -455,7 +483,10 @@ export const writeTools: AnyToolDef[] = [
       confirmation_token: confirmArg,
     },
     async handler(args, ctx) {
-      const ref = await ctx.api.resolveGame(args["game"] as string);
+      const ref = assertUnambiguous(
+        await ctx.api.resolveGame(args["game"] as string),
+        args["game"] as string,
+      );
       const playthroughId = args["playthrough_id"] as number;
       const log = await ctx.api.getGameLog(ref.id);
       const target = log.playthroughs.find((p) => p.id === playthroughId);
@@ -501,7 +532,10 @@ export const writeTools: AnyToolDef[] = [
     destructive: true,
     inputSchema: { game: gameArg, confirmation_token: confirmArg },
     async handler(args, ctx) {
-      const ref = await ctx.api.resolveGame(args["game"] as string);
+      const ref = assertUnambiguous(
+        await ctx.api.resolveGame(args["game"] as string),
+        args["game"] as string,
+      );
       const log = await ctx.api.getGameLog(ref.id);
 
       if (!log.entry.logId) {

@@ -2,6 +2,7 @@ import type { GameLog, LibraryStatus, Playthrough, UserGameEntry } from "../type
 import { ratingToStars } from "../types.js";
 import { deriveStatus, normalisePlayedStatus } from "./library.js";
 import { parseSessions } from "./sessions.js";
+import { ParseError } from "../errors.js";
 
 /** Shape of `GET /log/edit/{game_id}`, which returns JSON rather than HTML. */
 interface LogEditResponse {
@@ -113,14 +114,24 @@ function normalisePlaythroughs(
     }));
 }
 
-/** Shape of `POST /api/user/games/logs`, the batch state lookup. */
+/**
+ * Shape of `POST /api/user/games/logs`, the batch state lookup.
+ *
+ * Throws on unparseable input rather than returning an empty map. An empty result is a
+ * meaningful answer here — "none of these games are in your library" — so silently
+ * producing one from a failed request turns a transport error into a confident, wrong
+ * claim about someone's library.
+ */
 export function parseBatchLogs(json: string): Map<number, UserGameEntry> {
   const out = new Map<number, UserGameEntry>();
   let data: Record<string, Record<string, unknown>>;
   try {
     data = JSON.parse(json) as typeof data;
   } catch {
-    return out;
+    throw new ParseError("batch log state", "/api/user/games/logs");
+  }
+  if (data === null || typeof data !== "object") {
+    throw new ParseError("batch log state", "/api/user/games/logs");
   }
 
   for (const [key, v] of Object.entries(data)) {

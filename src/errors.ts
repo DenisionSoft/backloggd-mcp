@@ -63,6 +63,33 @@ export class HttpError extends BackloggdError {
   }
 }
 
+/** The thing asked for does not exist on Backloggd. */
+export class NotFoundError extends BackloggdError {
+  constructor(message: string, hint?: string) {
+    super(message, "NOT_FOUND", hint);
+    this.name = "NotFoundError";
+  }
+}
+
+/**
+ * A title matched several distinct games. Carries the candidates so the caller can pin
+ * one with `Title (year)` rather than having the server guess.
+ */
+export class AmbiguousError extends BackloggdError {
+  constructor(
+    message: string,
+    readonly candidates: { id: number; slug: string; title: string; year: number | null }[],
+  ) {
+    super(
+      message,
+      "AMBIGUOUS",
+      "Disambiguate by year, e.g. \"Donkey Kong (1981)\". Where several share a year, " +
+        "pass one of the slugs listed in candidates directly.",
+    );
+    this.name = "AmbiguousError";
+  }
+}
+
 /** A page parsed, but not into the shape we expected — almost always a site redesign. */
 export class ParseError extends BackloggdError {
   constructor(what: string, url?: string) {

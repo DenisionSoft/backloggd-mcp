@@ -1,5 +1,5 @@
 import { BASE_URL } from "../config.js";
-import { ParseError } from "../errors.js";
+import { NotFoundError, ParseError } from "../errors.js";
 import type { GameDetail } from "../types.js";
 import {
   aggregateRating,
@@ -66,8 +66,30 @@ export function parseRatingDistribution(html: string): RatingDistribution | null
   return Object.keys(out).length > 0 ? out : null;
 }
 
+/**
+ * True when Backloggd served its "game not found" page.
+ *
+ * It answers with **HTTP 200**, not a 404, so status codes cannot be trusted here. The
+ * reliable signal is structural: a real game page always carries `#game-page-meta`,
+ * and the error page does not. Detecting it matters more than it looks — the error
+ * page is full of recommendation cards, so a parser that keeps going happily scrapes
+ * some unrelated game's id off one of them and reports it as the game you asked for.
+ */
+export function isGameNotFoundPage(html: string): boolean {
+  return !html.includes('id="game-page-meta"');
+}
+
 /** Parse `/games/{slug}/` into structured metadata. */
 export function parseGamePage(html: string, slug: string): GameDetail {
+  if (isGameNotFoundPage(html)) {
+    throw new NotFoundError(
+      `Backloggd has no game at /games/${slug}/.`,
+      "It served its 'Game not found' page (with a 200 status). Note that game URLs " +
+        "use slugs, not numeric ids — /games/119133/ is not a valid page even though " +
+        "119133 is a real game id.",
+    );
+  }
+
   const $ = load(html);
 
   const title =
